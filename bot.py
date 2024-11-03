@@ -4,7 +4,7 @@ import random
 import os
 import tempfile
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters, JobQueue
 from telegram.error import BadRequest, TelegramError
 import time
 
@@ -137,7 +137,6 @@ def help_command(update: Update, context: CallbackContext):
                    "/referral - See your referral count 👥"
     update.message.reply_text(help_message)
 
-
 # VIP command
 def vip(update: Update, context: CallbackContext):
     message = (
@@ -159,6 +158,7 @@ def vip(update: Update, context: CallbackContext):
         update.message.reply_text("Welcome, VIP! Enjoy your exclusive content 🔥")
     else:
         update.message.reply_text(message)
+
 # Referral command
 def referral(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
@@ -166,7 +166,7 @@ def referral(update: Update, context: CallbackContext):
     referral_link = f"https://t.me/{bot.username}?start={user_id}"
     keyboard = [[InlineKeyboardButton("Refer a Friend", switch_inline_query="")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text(f"You have referred {referral_count} friends.\nYour referral link: {referral_link}", reply_markup=reply_markup)
+    update.message.reply_text(f"You have referred {referral_count}. friends.", reply_markup=reply_markup)
 
 # Admin-only data command
 def data(update: Update, context: CallbackContext):
@@ -184,30 +184,38 @@ def data(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Error sending data to admin: {e}")
 
+# Send user data to admin every hour
+def hourly_data_send(context: CallbackContext):
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+            temp_file.write(json.dumps(users_data, indent=4).encode('utf-8'))
+            temp_file_path = temp_file.name
+
+        with open(temp_file_path, 'rb') as file:
+            context.bot.send_document(chat_id=ADMIN_ID, document=file, filename='users_data.json')
+    except Exception as e:
+        logger.error(f"Error sending hourly data to admin: {e}")
+
+# Command to add a new item (admin only)
 # Command to add a new item (admin only)
 def add_item(update: Update, context: CallbackContext):
-    try:
-        if update.effective_user.id != ADMIN_ID:
-            update.message.reply_text("You are not authorized to use this command.")
-            return
+    if update.effective_user.id != ADMIN_ID:
+        update.message.reply_text("You are not authorized to use this command.")
+        return
 
-        if len(context.args) < 2:
-            update.message.reply_text("Please provide both a URL and an image link. Usage: /additem <url> <image_link>")
-            return
+    if len(context.args) < 2:
+        update.message.reply_text("Please provide a URL and an image link.")
+        return
 
-        url = context.args[0]
-        image_link = context.args[1]
+    url = context.args[0]
+    image_url = context.args[1]
 
-        items = load_items()
-        new_item = {"url": url, "image": image_link}
-        items.append(new_item)
-        save_items(items)
-        update.message.reply_text(f"New item added: {new_item}")
-    except Exception as e:
-        logger.error(f"Error in add_item command: {e}")
-        update.message.reply_text("An error occurred while adding the item. Please try again later.")
+    items = load_items()
+    items.append({"url": url, "image": image_url})
+    save_items(items)
 
-# Command to broadcast a message to all users (admin only)
+    update.message.reply_text("Item added successfully!")
+
 def broadcast(update: Update, context: CallbackContext):
     if update.effective_user.id != ADMIN_ID:
         update.message.reply_text("You are not authorized to use this command.")
@@ -230,23 +238,37 @@ def broadcast(update: Update, context: CallbackContext):
 
     update.message.reply_text(f"Broadcast completed. Sent: {sent}, Blocked: {blocked}")
 
-# Main function to set up handlers and start the bot
+
+# Error handling for the bot
+def error_handler(update: Update, context: CallbackContext):
+    logger.error(f"Update {update} caused error {context.error}")
+
 def main():
-    updater = Updater(BOT_TOKEN, use_context=True)
+    # Start the bot
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    job_queue = updater.job_queue
     dp = updater.dispatcher
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("gen", gen))
-    dp.add_handler(CommandHandler("alive", alive))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("vip", vip))
-    dp.add_handler(CommandHandler("referral", referral))
-    dp.add_handler(CommandHandler("data", data))
-    dp.add_handler(CommandHandler("additem", add_item))
+    # Register command handlers
+    updater.dispatcher.add_handler(CommandHandler("start", start))
+    updater.dispatcher.add_handler(CommandHandler("gen", gen))
+    updater.dispatcher.add_handler(CommandHandler("alive", alive))
+    updater.dispatcher.add_handler(CommandHandler("help", help_command))
+    updater.dispatcher.add_handler(CommandHandler("vip", vip))
+    updater.dispatcher.add_handler(CommandHandler("referral", referral))
+    updater.dispatcher.add_handler(CommandHandler("data", data))
+    updater.dispatcher.add_handler(CommandHandler("additem", add_item))
     dp.add_handler(CommandHandler("broadcast", broadcast))
 
+    # Register error handler
+    updater.dispatcher.add_error_handler(error_handler)
+
+    # Schedule the hourly data send to admin
+    job_queue.run_repeating(hourly_data_send, interval=3600, first=0)
+
+    # Start polling for updates
     updater.start_polling()
     updater.idle()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
